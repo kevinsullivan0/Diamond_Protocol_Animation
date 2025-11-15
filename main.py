@@ -59,12 +59,13 @@ class Grid(Graph):
         for edge in self.highedge:
             self.edges[edge].set_color(GREEN)
 
+    # computes the approximate steiner tree 
     def compute_MST(self):
         steiner_graph = nx.algorithms.approximation.steiner_tree(
-            self._graph,
-            self.stabilizers,
-            weight = 'weight',
-            method = "mehlhorn"
+            self._graph, # pass the manim graph as a networkx graph (this is the parent graph)
+            self.stabilizers, # pass the list of qubits in the support of a stabilizer (list of terminal nodes)
+            weight = 'weight', # defaults to weight 1 for all edges
+            method = "mehlhorn" # the underlying algorithm
         )
         return_list = []
         for edge in steiner_graph.edges():
@@ -72,6 +73,7 @@ class Grid(Graph):
                 return_list.append((edge[1],edge[0]))
             else:
                 return_list.append(edge)
+        # put the steiner tree into the tile grid
         return Grid(self.tile,highlightedges = return_list)
 
 
