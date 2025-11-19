@@ -97,6 +97,10 @@ class Grid(Graph):
     and computes the layered scheduling for that tree.
     This is almost a direct implementation of Algorithm 3: Route-Pack-PerType
     Returns: `schedule`: a list of nx.Graph 
+    NOTE: THIS ONLY WORKS FOR A SINGLE STABILIZER/TREE right now, since it uses only a single root
+            We may need a separate algorithm to combine these for the forest of trees. 
+            Or perhaps the forest is created, the conflicts are found, and then something is done there?
+            May need to take a look at Emerson's code
     """
     def compute_layered_schedule_from_conflict_graph(self, F_a: nx.Graph, root) -> list[nx.Graph]:
         schedule: list[nx.Graph] = []
@@ -108,11 +112,26 @@ class Grid(Graph):
         # - Note that layer 0 is the farthest from the root, so we reverse the list from bfs_layers
         layers: list[nx.Graph] = list(nx.bfs_layers(F_a, root)).reverse()
         num_layers = layers.len()
+        """
+        to do this globally, just need to compute the layer for each tree individually. then take the union of all 
+        of the "layers" of a specific level and then apply the below script as-is
+        this would change what the inputs to the function are (a list of tuples of trees and roots [(F_a, root)])
+        """
 
         # for each "time step" from the outside in, deal with the conflicts by further partitioning
         for l in num_layers:
             # build the conflict graph C_l
+
             C_l: nx.Graph = layers[l]
+            """ brainstorming about what the conflict graph is and how to make it
+            - perhaps put creating the conflict graph in a separate method?
+            - I think the conflict graph has as its nodes the edges in the layer
+            -   that are not orphans, though the orphans still need to be scheduled, so should all be put in?
+            - the conflict graph is structured somewhat differently, or maybe I am overthinking this, since this
+            - method takes in the steiner tree, which is already in the dual graph
+            - upon further thinking I think I am overthinking this (wow that's a sentence, but I'm leaving it in for now, since I may be wrong)
+            - thus I think the conflict graph is just a layer of the steiner tree.
+            """
 
             # TODO later for completeness: add interface reservations for boundaries/overlaps
 
@@ -327,4 +346,9 @@ networkx does not implement Misra–Gries or any other graph *edge* coloring alg
 - The package "GCol" is compatible with networkx and implements `gcol.edge_coloring(G)`
 
 
+"""
+"""
+Wait, but are there not three types of conflicts? I may have been thinking of the conflict graph incorrectly. 
+- for 2 directions of CNOTs and 1 SWAP?
+- Actually we can probably limit it to just CNOTs and swaps, or rather this is only an issue for combining multiple tiles I think?
 """
