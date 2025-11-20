@@ -22,6 +22,7 @@ class Grid(Graph):
         self.stabilizers = []
         self.highedge = highlightedges
         #use first tile.size^2 entries for vertical, next tile.size^2 for horizontal
+        # Create the diamonds 
         for i in range(tile.size):
             for j in range(tile.size):
                 vertices.append((i,j))
@@ -57,9 +58,9 @@ class Grid(Graph):
         self.highlight_edges()
 
     #Returns new graph with spanning tree lines highlighted (changes the color of all edges in highedges)
-    def highlight_edges(self):
+    def highlight_edges(self, color=GREEN):
         for edge in self.highedge:
-            self.edges[edge].set_color(GREEN)
+            self.edges[edge].set_color(color)
 
     # computes the approximate steiner tree 
     def compute_MST(self):
@@ -78,6 +79,25 @@ class Grid(Graph):
         # put the steiner tree into the tile grid
         return Grid(self.tile,highlightedges = return_list)
 
+    def compute_MST_nx(self) -> nx.Graph:
+       steiner_graph = nx.algorithms.approximation.steiner_tree(
+            self._graph, # pass the manim graph as a networkx graph (this is the parent graph)
+            self.stabilizers, # pass the list of qubits in the support of a stabilizer (list of terminal nodes)
+            weight = 'weight', # defaults to weight 1 for all edges
+            method = "mehlhorn" # the underlying algorithm
+        ) 
+       # We create a new Directed or Undirected graph explicitly to hold the clean edges
+       clean_mst = nx.Graph() 
+       for edge in steiner_graph.edges():
+           if edge[0][0] >= self.tile.size**2:
+               clean_mst.add_edge(edge[1], edge[0]) # Swap
+           else:
+               clean_mst.add_edge(edge[0], edge[1]) # Keep
+       # COPY attributes from the parent graph if needed (positions, weights)
+       # This ensures the subgraph 'knows' where it is in space
+       clean_mst.add_nodes_from((n, self._graph.nodes[n]) for n in clean_mst.nodes())
+       return clean_mst # preserves the positions in the lattice
+
 
     def set_stabilizer(self):
         for tuple in self.tile.stab_ver:
@@ -86,86 +106,96 @@ class Grid(Graph):
             new_tuple = (tuple[0]+self.tile.size**2,tuple[1]+self.tile.size**2)
             self.stabilizers.append(new_tuple)
 
-    def set_stabilizer_color(self):
+    def set_stabilizer_color(self, color=RED):
         for stab in self.stabilizers:
-            self[stab].set_fill(RED, opacity=1)
+            self[stab].set_fill(color, opacity=1)
 
         
+"""
+Takes a steiner tree `F_a` for a stabilizer of type `a` in {X,Z}
+and a `root` qubit in F_a that will be the ancilla (the qubit that all of the information converges to)
+and computes the layered scheduling for that tree.
+This is almost a direct implementation of Algorithm 3: Route-Pack-PerType
+Returns: `schedule`: a list of nx.Graph 
+NOTE: THIS ONLY WORKS FOR A SINGLE STABILIZER/TREE right now, since it uses only a single root
+        We may need a separate algorithm to combine these for the forest of trees. 
+        Or perhaps the forest is created, the conflicts are found, and then something is done there?
+        May need to take a look at Emerson's code
+"""
+def compute_layered_schedule_from_conflict_graph(F_a: nx.Graph, root) -> list[nx.Graph]:
+    schedule: list[nx.Graph] = []
+    # check if root is in F_a
+    if root not in F_a:
+        raise ValueError(f"Root '{root}' is not present in graph F_a")
+
+    # use BFS (breadth-first search) from `root` to determine the layers (time steps)
+    # - Note that layer 0 is the farthest from the root, so we reverse the list from bfs_layers
+    #layers: list[nx.Graph] = list(nx.bfs_layers(F_a, root)).reverse()
+    # 1. Get the layers as lists of nodes
+    # Use [::-1] to reverse the list cleanly in one line
+    node_layers = list(nx.bfs_layers(F_a, root))[::-1]
+
+    # 2. Convert node lists into Graph objects
+    # We use .subgraph() to get the graph structure (nodes + internal edges)
+    # We use .copy() to ensure they are standalone objects
+    layers: list[nx.Graph] = [F_a.subgraph(nodes).copy() for nodes in node_layers]
+    num_layers = len(layers)
     """
-    Takes a steiner tree `F_a` for a stabilizer of type `a` in {X,Z}
-    and a `root` qubit in F_a that will be the ancilla (the qubit that all of the information converges to)
-    and computes the layered scheduling for that tree.
-    This is almost a direct implementation of Algorithm 3: Route-Pack-PerType
-    Returns: `schedule`: a list of nx.Graph 
-    NOTE: THIS ONLY WORKS FOR A SINGLE STABILIZER/TREE right now, since it uses only a single root
-            We may need a separate algorithm to combine these for the forest of trees. 
-            Or perhaps the forest is created, the conflicts are found, and then something is done there?
-            May need to take a look at Emerson's code
+    to do this globally, just need to compute the layer for each tree individually. then take the union of all 
+    of the "layers" of a specific level and then apply the below script as-is
+    this would change what the inputs to the function are (a list of tuples of trees and roots [(F_a, root)])
+    Would need to account for CNOTS vs SWAPS and directions
     """
-    def compute_layered_schedule_from_conflict_graph(self, F_a: nx.Graph, root) -> list[nx.Graph]:
-        schedule: list[nx.Graph] = []
-        # check if root is in F_a
-        if root not in F_a:
-            raise ValueError(f"Root '{root}' is not present in graph F_a")
 
-        # use BFS (breadth-first search) from `root` to determine the layers (time steps)
-        # - Note that layer 0 is the farthest from the root, so we reverse the list from bfs_layers
-        layers: list[nx.Graph] = list(nx.bfs_layers(F_a, root)).reverse()
-        num_layers = layers.len()
+    # TODO: put the rest of this in a separate method
+    # for each "time step" from the outside in, deal with the conflicts by further partitioning
+    for l in range(num_layers):
+        # build the conflict graph C_l
+
+        C_l: nx.Graph = layers[l]
+        """ brainstorming about what the conflict graph is and how to make it
+        - perhaps put creating the conflict graph in a separate method?
+        - I think the conflict graph has as its nodes the edges in the layer
+        -   that are not orphans, though the orphans still need to be scheduled, so should all be put in?
+        - the conflict graph is structured somewhat differently, or maybe I am overthinking this, since this
+        - method takes in the steiner tree, which is already in the dual graph
+        - upon further thinking I think I am overthinking this (wow that's a sentence, but I'm leaving it in for now, since I may be wrong)
+        - thus I think the conflict graph is just a layer of the steiner tree.
         """
-        to do this globally, just need to compute the layer for each tree individually. then take the union of all 
-        of the "layers" of a specific level and then apply the below script as-is
-        this would change what the inputs to the function are (a list of tuples of trees and roots [(F_a, root)])
-        """
 
-        # for each "time step" from the outside in, deal with the conflicts by further partitioning
-        for l in num_layers:
-            # build the conflict graph C_l
+        # TODO later for completeness: add interface reservations for boundaries/overlaps
 
-            C_l: nx.Graph = layers[l]
-            """ brainstorming about what the conflict graph is and how to make it
-            - perhaps put creating the conflict graph in a separate method?
-            - I think the conflict graph has as its nodes the edges in the layer
-            -   that are not orphans, though the orphans still need to be scheduled, so should all be put in?
-            - the conflict graph is structured somewhat differently, or maybe I am overthinking this, since this
-            - method takes in the steiner tree, which is already in the dual graph
-            - upon further thinking I think I am overthinking this (wow that's a sentence, but I'm leaving it in for now, since I may be wrong)
-            - thus I think the conflict graph is just a layer of the steiner tree.
-            """
+        # compute delta: the maximum degree of C_l
+        degrees = C_l.degree()
+        delta = max(degree for node, degree in degrees)
 
-            # TODO later for completeness: add interface reservations for boundaries/overlaps
+        # determine if C_l is bipartite (allows for computational speedup)
+        is_bipartite = nx.is_bipartite(C_l)
 
-            # compute delta: the maximum degree of C_l
-            degrees = C_l.degree()
-            delta = max(degree for node, degree in degrees)
+        if is_bipartite:
+            for c in range(delta):
+            # for c=1 to delta (a matching removes one edge from a node, decreasing its degree by 1, 
+            #                   so we need to iterate delta times to account for all edges)
+                M_c = nx.algorithms.bipartite.hopcroft_karp_matching(C_l) # returns a dictionary of corresponding (matched) nodes
+                # note that this is redundant (A:B and B:A are both included in the dictionary, but is likely good for convenience)
+                schedule.append(nx.Graph(M_c))
+                C_l.remove_edges_from(M_c.items()) # remove the matched edges
+        else:
+            coloring_dict = edge_coloring(C_l) # returns a dictionary of (A,B):color_as_int
 
-            # determine if C_l is bipartite (allows for computational speedup)
-            is_bipartite = nx.is_bipartite(C_l)
+            # Swap the keys/values so we now have a dictionary where the key is a color (integer)
+            # and the value is a list of edges
+            colors_to_edges = defaultdict(list)
+            for edge, color in coloring_dict.items():
+                colors_to_edges[color].append(edge)
 
-            if is_bipartite:
-                for c in range(delta):
-                # for c=1 to delta (a matching removes one edge from a node, decreasing its degree by 1, 
-                #                   so we need to iterate delta times to account for all edges)
-                    M_c = nx.algorithms.bipartite.hopcroft_karp_matching(C_l) # returns a dictionary of corresponding (matched) nodes
-                    # note that this is redundant (A:B and B:A are both included in the dictionary, but is likely good for convenience)
-                    schedule.append(nx.Graph(M_c))
-                    C_l.remove_edges_from(M_c.items()) # remove the matched edges
-            else:
-                coloring_dict = edge_coloring(C_l) # returns a dictionary of (A,B):color_as_int
+            # create a new nx.Graph for each color and append each new graph to `schedule`
+            for color, edge_list in colors_to_edges.items():
+                G_color = nx.Graph()
+                G_color.add_edges_from(edge_list)
+                schedule.append(G_color)
 
-                # Swap the keys/values so we now have a dictionary where the key is a color (integer)
-                # and the value is a list of edges
-                colors_to_edges = defaultdict(list)
-                for edge, color in coloring_dict.items():
-                    colors_to_edges[color].append(edge)
-
-                # create a new nx.Graph for each color and append each new graph to `schedule`
-                for color, edge_list in colors_to_edges.items():
-                    G_color = nx.Graph()
-                    G_color.add_edges_from(edge_list)
-                    schedule.append(G_color)
-
-        return schedule
+    return schedule
 
 
 
@@ -282,33 +312,90 @@ class Tile(VMobject):
 # the main scene (manim renders scenes)
 class Tile_Scene(MovingCameraScene):
     def construct(self):
-        stab_hor = [(0,1),(1,1),(2,2),(4,4),(3,4)] # horizontal support qubits
-        stab_ver = [(1,0),(1,1),(2,4),(3,3)] # vertical support qubits
+        #stab_hor = [(0,1),(1,1),(2,2),(4,4),(3,4)] # horizontal support qubits
+        #stab_ver = [(1,0),(1,1),(2,4),(3,3)] # vertical support qubits
+        stab_hor = [(0,1),(1,1)] # horizontal support qubits
+        stab_ver = [(1,0),(1,1)] # vertical support qubits
         vertex = Tile(5,stab_hor,stab_ver,True) # "star" operator
         plaquette = vertex.makeSymetricTile() # dual "plaquette" operator
 
-        #vertex.setGrid(Grid(vertex))
-        #grid = vertex.getGrid()
-        #steiner = grid.compute_MST()
 
-        #self.play(steiner.animate.shift(UP).rotate(PI / 3),run_time=4)
+        
+        # BEGIN: test scheduler
+        vertex.setGrid(Grid(vertex))
+        grid = vertex.getGrid()
 
-        #self.camera.frame.move_to(steiner)
-        plaquette.next_to(vertex, LEFT) # set the two tiles as adjacent to one another
+        #=====================================================================
 
-        # add the two tiles to the manim scene
-        self.add(vertex)
-        self.add(plaquette)
+        self.tile = vertex # however you initialize your tile (e.g., Tile(5))
+    
+        # Create the initial grid for calculation
+        grid_obj = Grid(self.tile, highlightedges=[])
+        self.add(grid_obj) # Add background immediately
 
+        # 2. Compute MST
+        steiner = grid_obj.compute_MST_nx()
+        
+        # DEBUG: Ensure we actually have a graph
+        print(f"Steiner Nodes: {len(steiner.nodes())}, Steiner Edges: {len(steiner.edges())}")
+        
+        if len(steiner.nodes()) == 0:
+            print("Error: Steiner Tree is empty!")
+            return
 
-        # set the initial camera location
-        self.camera.frame.move_to(vertex)
-        #self.add(vertex.getGrid())
-        self.wait(0.5)
-        self.combineTwoTileAnimation(vertex,plaquette,3) # manim: move "plaquette" on top of "vertex"
+        root = list(steiner.nodes())[0]
 
-        #self.play(FadeIn(vertex.getGrid()))
-        self.wait(2)
+        # 3. Compute Schedule (FIXED LOGIC)
+        # We cannot just use bfs_layers directly for subgraphs in a tree. 
+        # We need to grab edges layer-by-layer.
+        schedule = []
+        
+        # Get layers of nodes: [[root], [neighbors], [neighbors of neighbors]...]
+        node_layers = list(nx.bfs_layers(steiner, root))
+        
+        # Iterate through layers to build cumulative or distinct edge sets
+        # This logic grabs the edges connecting layer i to layer i+1
+        for i in range(len(node_layers) - 1):
+            current_layer_nodes = node_layers[i]
+            next_layer_nodes = node_layers[i+1]
+            
+            # Find edges in 'steiner' that connect these two layers
+            edges_between = []
+            for u in current_layer_nodes:
+                for v in next_layer_nodes:
+                    if steiner.has_edge(u, v):
+                        edges_between.append((u, v))
+            
+            # Create a clean subgraph for this step
+            step_graph = nx.Graph()
+            step_graph.add_nodes_from(current_layer_nodes + next_layer_nodes)
+            step_graph.add_edges_from(edges_between)
+            
+            schedule.append(step_graph)
+
+        print(f"Number of layers generated: {len(schedule)}")
+
+        # 4. Render Loop (FIXED ATTRIBUTE)
+        grid_layers = []
+        my_palette = [RED, BLUE, GREEN, YELLOW, ORANGE, PURPLE]
+
+        for i, sub_graph in enumerate(schedule):
+            current_edges = list(sub_graph.edges())
+            if not current_edges: continue
+
+            chosen_color = my_palette[i % len(my_palette)]
+            
+            # FIX: Use 'self.tile' (which we defined at the top)
+            new_layer = Grid(self.tile, highlightedges=current_edges)
+            new_layer.highlight_edges(chosen_color)
+            grid_layers.append(new_layer)
+
+        # 5. Animate
+        for i, layer in enumerate(grid_layers):
+            if i > 0:
+                self.wait(0.5)
+            self.play(FadeIn(layer), run_time=0.5)
+        #=======================================================================
 
 
         #self.play(Transform(plaquette,vertex), run_time=5)
